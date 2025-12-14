@@ -11,20 +11,20 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 @RequiredArgsConstructor
-class TemplatePluginTest {
+class ContentLoaderPluginTest {
 
     final Project project;
 
     @BeforeEach
     void beforeEach() {
-        project.getPluginManager().apply(TemplatePlugin.class);
+        project.getPluginManager().apply(ContentLoaderPlugin.class);
     }
 
     @Test
     void pluginTasksDoNotHavePropertyProblems() {
         executeAfterEvaluateActions(project);
 
-        var taskClassNamePrefix = packageNameOf(TemplatePlugin.class) + '.';
+        var taskClassNamePrefix = packageNameOf(ContentLoaderPlugin.class) + '.';
         project.getTasks().stream()
             .filter(task -> {
                 var taskClass = unwrapGeneratedSubclass(task.getClass());

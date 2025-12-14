@@ -5,13 +5,13 @@ import name.remal.gradle_plugins.toolkit.testkit.functional.GradleProject;
 import org.junit.jupiter.api.Test;
 
 @RequiredArgsConstructor
-class TemplatePluginFunctionalTest {
+class ContentLoaderPluginFunctionalTest {
 
     final GradleProject project;
 
     @Test
     void helpTaskWorks() {
-        project.getBuildFile().applyPlugin("name.remal.template-plugin");
+        project.getBuildFile().applyPlugin("name.remal.content-loader");
         project.assertBuildSuccessfully("help");
     }
 
