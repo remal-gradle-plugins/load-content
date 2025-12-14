@@ -1,0 +1,437 @@
+name: build
+
+on:
+  push:
+    branches:
+    - main
+    - 'release/*'
+    - 'test/*'
+    tags:
+    - 'v*'
+  pull_request: { }
+  schedule:
+  - cron: '2 7 * * *' # sync-with-template: adjust
+  workflow_dispatch:
+    inputs:
+      rerun-tests:
+        required: true
+        default: 'false'
+        description: Set to 'true' to make all test tasks out-of-date and rerun tests
+        type: choice
+        options:
+        - 'true'
+        - 'false'
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  RERUN_TESTS: ${{inputs.rerun-tests == 'true'}}
+  GIT_REF: ${{github.ref}}
+  GIT_SHA: ${{github.sha}}
+  GITHUB_ACTIONS_TOKEN: ${{github.token}}
+  GITHUB_ACTIONS_RUN_ID: ${{github.run_id}}
+  GITHUB_ACTIONS_RUN_ATTEMPT: ${{github.run_attempt}}
+  GITHUB_ACTIONS_JOB: ${{github.job}}
+
+jobs:
+  populate-cache:
+    if: >-
+      ${{
+        (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))
+        || (github.event_name == 'push' && !contains(github.event.head_commit.message, '[push-back]') && !contains(github.event.head_commit.message, '[noci]') && !contains(github.event.head_commit.message, '[no-ci]'))
+        || github.event_name != 'push'
+      }}
+    concurrency:
+      group: build-populate-cache-${{github.ref}}
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v6
+      with:
+        submodules: recursive
+        fetch-depth: 1
+
+    - name: Cache Gradle
+      id: cache-gradle
+      uses: remal-github-actions/cache-gradle@v1
+      with:
+        build-cache-enabled: 'false'
+
+    - name: Set DEFAULT_JAVA_VERSION
+      if: ${{steps.cache-gradle.outputs.gradle-wrapper-cache-hit != 'true' || steps.cache-gradle.outputs.gradle-caches-cache-hit != 'true'}}
+      uses: ./.github/workflows/actions/set-default-java-version
+    - name: Setup Java ${{env.DEFAULT_JAVA_VERSION}}
+      if: ${{steps.cache-gradle.outputs.gradle-wrapper-cache-hit != 'true' || steps.cache-gradle.outputs.gradle-caches-cache-hit != 'true'}}
+      uses: actions/setup-java@v5
+      with:
+        java-version: ${{env.DEFAULT_JAVA_VERSION}}
+        distribution: temurin
+    - name: Validate Gradle Wrapper
+      if: ${{steps.cache-gradle.outputs.gradle-wrapper-cache-hit != 'true' || steps.cache-gradle.outputs.gradle-caches-cache-hit != 'true'}}
+      uses: Wandalen/wretry.action/main@v3.8.0
+      with:
+        action: gradle/actions/wrapper-validation@v5
+        attempt_limit: 3
+        attempt_delay: 5000
+
+    - name: Create Gradle wrapper cache content
+      if: ${{steps.cache-gradle.outputs.gradle-wrapper-cache-hit != 'true'}}
+      run: |
+        ./gradlew-retry-connection-timeouts help
+
+    - name: Create Gradle caches cache content
+      if: ${{steps.cache-gradle.outputs.gradle-caches-cache-hit != 'true'}}
+      run: |
+        ./gradlew-retry-connection-timeouts downloadDependencies
+
+
+  build:
+    needs:
+    - populate-cache
+    outputs:
+      repository-isTemplate: ${{fromJSON(steps.repository-info.outputs.result).isTemplate}}
+      publish-isGradlePlugin: ${{steps.publish-flags.outputs.isGradlePlugin}}
+      publish-isMavenCentral: ${{steps.publish-flags.outputs.isMavenCentral}}
+      env-json: ${{steps.prepare-env-for-cross-versions-tests.outputs.env-json}}
+    concurrency:
+      group: build-build-${{github.ref}}
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v6
+      with:
+        submodules: recursive
+        fetch-depth: 1
+    - name: Cache Gradle
+      uses: remal-github-actions/cache-gradle@v1
+    - name: Set DEFAULT_JAVA_VERSION
+      uses: ./.github/workflows/actions/set-default-java-version
+    - name: Setup Java ${{env.DEFAULT_JAVA_VERSION}}
+      uses: actions/setup-java@v5
+      with:
+        java-version: ${{env.DEFAULT_JAVA_VERSION}}
+        distribution: temurin
+
+    - name: Retrieve repository info
+      id: repository-info
+      uses: remal-github-actions/retrieve-repository-info@v1
+
+    - name: Submit dependencies to GitHub
+      if: ${{(github.event_name == 'push' || github.event_name == 'workflow_dispatch') && startsWith(github.ref, 'refs/heads/')}}
+      run: |
+        ./gradlew-retry-connection-timeouts githubSubmitDependencies
+
+    - name: Compile classes
+      run: |
+        ./gradlew-retry-connection-timeouts allClasses
+        echo "DISABLE_COMPILATION=true" | tee -a $GITHUB_ENV
+    - name: Build without tests
+      run: |
+        ./gradlew-retry-connection-timeouts build publishToMavenLocal -Pdisable-tests=true
+
+    - name: Read publish flags
+      id: publish-flags
+      run: |
+        if [ -f "build/publish-gradle-plugin.flag" ]; then
+          echo "isGradlePlugin=true" | tee -a $GITHUB_OUTPUT
+        else
+          echo "isGradlePlugin=false" | tee -a $GITHUB_OUTPUT
+        fi
+        if [ -f "build/publish-maven-central.flag" ]; then
+          echo "isMavenCentral=true" | tee -a $GITHUB_OUTPUT
+        else
+          echo "isMavenCentral=false" | tee -a $GITHUB_OUTPUT
+        fi
+    - name: Archive and upload workspace
+      if: ${{!cancelled()}}
+      uses: ./.github/workflows/actions/archive-upload-workspace
+
+    - name: Prepare environment variables for cross-versions-tests
+      id: prepare-env-for-cross-versions-tests
+      uses: actions/github-script@v8
+      env:
+        ENV_JSON: ${{toJSON(env)}}
+      with:
+        script: |
+          const envObj = JSON.parse(process.env.ENV_JSON)
+          for (const name of Object.keys(envObj)) {
+            if (name.startsWith('GITHUB_')) {
+              delete envObj[name]
+            }
+          }
+          core.info(JSON.stringify(envObj, null, '  '))
+          core.setOutput('env-json', JSON.stringify(envObj))
+
+
+  cross-versions-tests:
+    needs:
+    - build
+    uses: ./.github/workflows/build-cross-versions-tests.yml
+    secrets: inherit
+    with:
+      env-json: ${{needs.build.outputs.env-json}}
+      java-gradle-only-once: false
+
+  # $$$sync-with-template-modifiable: cross-versions-additional-tests $$$
+  # $$$sync-with-template-modifiable-end$$$
+
+  cross-versions-tests-success:
+    needs:
+    - cross-versions-tests
+    # $$$sync-with-template-modifiable: cross-versions-additional-tests-dependents $$$
+    # $$$sync-with-template-modifiable-end$$$
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+    - name: Display success message
+      run: |
+        echo "All cross versions tests executed successfully"
+
+
+  combine-jacoco-reports:
+    needs:
+    - cross-versions-tests-success
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DISABLE_COMPILATION: 'true'
+      DISABLE_VERIFICATION: 'true'
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v6
+      with:
+        submodules: recursive
+        fetch-depth: 1
+    - name: Cache Gradle
+      uses: remal-github-actions/cache-gradle@v1
+    - name: Set DEFAULT_JAVA_VERSION
+      uses: ./.github/workflows/actions/set-default-java-version
+    - name: Setup Java ${{env.DEFAULT_JAVA_VERSION}}
+      uses: actions/setup-java@v5
+      with:
+        java-version: ${{env.DEFAULT_JAVA_VERSION}}
+        distribution: temurin
+    - name: Download and extract workspace
+      uses: ./.github/workflows/actions/download-extract-workspace
+
+    - name: Download all exec files
+      id: download-exec-files
+      uses: Wandalen/wretry.action/main@v3.8.0
+      with:
+        action: actions/download-artifact@v7
+        attempt_limit: 3
+        attempt_delay: 5000
+        with: |
+          pattern: 'jacoco-matrix-exec-files-*'
+          path: build/jacoco-matrix-exec-files
+    - name: Calculate and display total coverage
+      run: |
+        ./gradlew-retry-connection-timeouts jacocoMatrixReportMerged displayMatrixTotalCodeCoverage "-Pjacoco-all-exec-files-dir=build/jacoco-matrix-exec-files"
+    - name: Upload Jacoco merged report
+      uses: actions/upload-artifact@v6
+      with:
+        name: jacoco-matrix-merged-report
+        path: build/reports/jacoco/jacocoMatrixReportMerged/
+        if-no-files-found: warn
+        retention-days: 90
+
+
+  push-back:
+    if: >-
+      ${{
+        (github.event_name == 'push' && github.ref == 'refs/heads/main')
+        || github.event_name == 'schedule'
+        || github.event_name == 'workflow_dispatch'
+      }}
+    needs:
+    - cross-versions-tests-success
+    concurrency:
+      group: build-push-back-${{github.ref}}
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DISABLE_COMPILATION: 'true'
+      DISABLE_VERIFICATION: 'true'
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v6
+      with:
+        token: ${{secrets.PUSH_BACK_TOKEN}}
+        submodules: recursive
+        fetch-depth: 1
+    - name: Cache Gradle
+      uses: remal-github-actions/cache-gradle@v1
+    - name: Set DEFAULT_JAVA_VERSION
+      uses: ./.github/workflows/actions/set-default-java-version
+    - name: Setup Java ${{env.DEFAULT_JAVA_VERSION}}
+      uses: actions/setup-java@v5
+      with:
+        java-version: ${{env.DEFAULT_JAVA_VERSION}}
+        distribution: temurin
+    - name: Download and extract workspace
+      uses: ./.github/workflows/actions/download-extract-workspace
+
+    - name: Read min supported Java version
+      id: min-java-version
+      uses: remal-github-actions/read-property@v1
+      with:
+        file: gradle.properties
+        property: 'java-runtime.min-version'
+    - name: Read min supported Gradle version
+      id: min-gradle-version
+      uses: remal-github-actions/read-property@v1
+      with:
+        file: gradle.properties
+        property: 'gradle-api.min-version'
+    - name: Retrieve max tested versions
+      id: max-tested-versions
+      uses: remal-github-actions/matrix-versions@v1
+      with:
+        matrix: |
+          java:
+            dependency: java
+            only:
+            - once
+            - lts
+            - stable
+            include:
+            - '[${{steps.min-java-version.outputs.value}},)'
+          gradle:
+            dependency: 'maven:name.remal.gradle-api:gradle-api'
+            repositories:
+            - 'https://maven.pkg.github.com/remal-gradle-api/packages'
+            only:
+            - once
+            - stable-minors+current-unstable
+            include:
+            - '[${{steps.min-gradle-version.outputs.value}},)'
+
+    - name: Execute push-back tasks
+      run: |
+        ./gradlew-retry-connection-timeouts pushBackTasks "-Pjava-runtime.max-version=${{fromJSON(steps.max-tested-versions.outputs.allMatrixIncludes)[0].java}}" "-Pgradle-api.max-version=${{fromJSON(steps.max-tested-versions.outputs.allMatrixIncludes)[0].gradle}}"
+
+    - name: Push back
+      if: ${{github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')}}
+      uses: remal-github-actions/push-back@v2
+      with:
+        message: '[push-back] Push-back updated files during build'
+
+
+  parse-git-tag:
+    if: ${{github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')}}
+    needs:
+    - cross-versions-tests-success
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      isVersion: ${{fromJSON(steps.parse-git-tag.outputs.result).isVersion}}
+    steps:
+    - name: Parse Git tag
+      id: parse-git-tag
+      uses: actions/github-script@v8
+      with:
+        script: |
+          const tagName = context.payload.ref.replace(/^refs\/tags\//, '')
+          core.info(`Git tag: ${tagName}`)
+          const result = {
+            isVersion: !!tagName.match(/^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-rc-[1-9]\d*)?$/),
+          }
+          core.info(JSON.stringify(result, null, '  '))
+          return result
+
+
+  publish-to-gradle-plugins-portal:
+    if: >-
+      ${{
+        github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        && fromJSON(needs.build.outputs.repository-isTemplate) != true
+        && fromJSON(needs.build.outputs.publish-isGradlePlugin) == true
+        && fromJSON(needs.parse-git-tag.outputs.isVersion) == true
+      }}
+    needs:
+    - parse-git-tag
+    - build
+    concurrency:
+      group: build-publish-to-gradle-plugins-portal-${{github.ref}}
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DISABLE_COMPILATION: 'true'
+      DISABLE_VERIFICATION: 'true'
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v6
+      with:
+        submodules: recursive
+        fetch-depth: 1
+    - name: Cache Gradle
+      uses: remal-github-actions/cache-gradle@v1
+    - name: Set DEFAULT_JAVA_VERSION
+      uses: ./.github/workflows/actions/set-default-java-version
+    - name: Setup Java ${{env.DEFAULT_JAVA_VERSION}}
+      uses: actions/setup-java@v5
+      with:
+        java-version: ${{env.DEFAULT_JAVA_VERSION}}
+        distribution: temurin
+    - name: Download and extract workspace
+      uses: ./.github/workflows/actions/download-extract-workspace
+
+    - name: Publish to Gradle Plugin Portal
+      run: |
+        ./gradlew-retry-connection-timeouts publishPlugins "-Pgradle.publish.key=${{secrets.GRADLE_PLUGINS_PORTAL_KEY}}" "-Pgradle.publish.secret=${{secrets.GRADLE_PLUGINS_PORTAL_SECRET}}"
+    - name: Push back published versions
+      run: |
+        ./gradlew-retry-connection-timeouts pushBackPublishedVersions
+
+
+  publish-to-maven-central:
+    if: >-
+      ${{
+        github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        && fromJSON(needs.build.outputs.repository-isTemplate) != true
+        && fromJSON(needs.build.outputs.publish-isMavenCentral) == true
+        && fromJSON(needs.parse-git-tag.outputs.isVersion) == true
+      }}
+    needs:
+    - parse-git-tag
+    - build
+    concurrency:
+      group: build-publish-to-maven-central-${{github.ref}}
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DISABLE_COMPILATION: 'true'
+      DISABLE_VERIFICATION: 'true'
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v6
+      with:
+        submodules: recursive
+        fetch-depth: 1
+    - name: Cache Gradle
+      uses: remal-github-actions/cache-gradle@v1
+    - name: Set DEFAULT_JAVA_VERSION
+      uses: ./.github/workflows/actions/set-default-java-version
+    - name: Setup Java ${{env.DEFAULT_JAVA_VERSION}}
+      uses: actions/setup-java@v5
+      with:
+        java-version: ${{env.DEFAULT_JAVA_VERSION}}
+        distribution: temurin
+    - name: Download and extract workspace
+      uses: ./.github/workflows/actions/download-extract-workspace
+
+    - name: Publish to Maven Central
+      run: |
+        ./gradlew-retry-connection-timeouts publishToSonatype closeAndReleaseSonatypeStagingRepository "-PsonatypeUsername=${{secrets.OSS_USER}}" "-PsonatypePassword=${{secrets.OSS_PASSWORD}}" "-Psigning.key=${{secrets.SIGNING_SECRET_KEY_RING}}" "-Psigning.keyId=${{secrets.SIGNING_KEY_ID}}" "-Psigning.password=${{secrets.SIGNING_PASSWORD}}"
+    - name: Push back published versions
+      run: |
+        ./gradlew-retry-connection-timeouts pushBackPublishedVersions

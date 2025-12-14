@@ -1,0 +1,134 @@
+import org.gradle.util.GradleVersion
+
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+
+buildscript {
+    String rootGroupId = project.ext.rootGroupId = "name.remal.gradle-plugins.${rootProject.name}"
+    String rootArtifactId = project.ext.rootArtifactId = rootProject.name
+    String rootSnapshotVersion = project.ext.rootSnapshotVersion = '1-SNAPSHOT'
+    dependencies {
+        //classpath("$rootGroupId:$rootArtifactId:$rootSnapshotVersion") { version { strictly(rootSnapshotVersion) } }
+        classpath 'name.remal.gradle-plugins.toolkit:build-logic:0.76.2'
+    }
+    repositories {
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+
+allprojects {
+    group = project.rootGroupId
+    version = project.rootSnapshotVersion
+}
+
+apply plugin: 'name.remal.toolkit.build-logic'
+
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+
+apply plugin: 'java-gradle-plugin'
+
+dependencies {
+}
+
+gradlePlugin {
+    plugins {
+        'name.remal.template-plugin' {
+            id = 'name.remal.template-plugin'
+            implementationClass = 'name.remal.gradle_plugins.template.TemplatePlugin'
+            displayName = 'Template plugin'
+        }
+    }
+}
+
+
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+/* TODO: REMOVE THIS SECTION FOR REAL PLUGIN                                 */
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+
+TaskProvider validateRepositoryProperties = tasks.register('validateRepositoryProperties') {
+    outputs.upToDateWhen { false }
+    group = 'verification'
+
+    Property<String> rootProjectNameProperty = objects.property(String).value(provider { project.rootProject.name }).with { it.finalizeValueOnRead(); it }
+    Provider<String> repositoryNameProperty = project.githubRepositoryInfo.repository.map { it.name }
+
+    doLast {
+        String rootProjectName = rootProjectNameProperty.get()
+        String repositoryName = repositoryNameProperty.getOrNull()
+        if (rootProjectName != repositoryName) {
+            throw new GradleException("Root project name ('$rootProjectName') does NOT equal to the repository name: '$repositoryName'")
+        }
+    }
+}
+
+tasks.named('check').configure { dependsOn(validateRepositoryProperties) }
+
+
+TaskProvider processGradleProperties = tasks.register('processGradleProperties') {
+    outputs.upToDateWhen { false }
+
+    Provider<String> repositoryNameProperty = project.githubRepositoryInfo.repository.map { it.name }
+    RegularFileProperty gradlePropertiesFileProperty = objects.fileProperty().value(layout.projectDirectory.file('gradle.properties'))
+
+    ListProperty<Integer> javaLtsVersions = objects.listProperty(Integer).value(provider { project.getLtsJavaRuntimeVersions() }).with { it.finalizeValueOnRead(); it }
+
+    ListProperty<GradleVersion> allGradleVersions = objects.listProperty(GradleVersion).value(provider { project.getAllGradleVersions() }).with { it.finalizeValueOnRead(); it }
+    ListProperty<GradleVersion> lastMinorVersions = objects.listProperty(GradleVersion).value(provider {
+        Map<String, GradleVersion> result = [:]
+        allGradleVersions.get().forEach { version ->
+            String minorVer = version.version.replaceFirst(/^(\d+\.\d+).*$/, '$1')
+            result.compute(minorVer) { _, prevVer ->
+                prevVer == null || prevVer > version
+                    ? version
+                    : prevVer
+            }
+        }
+        return result.values().toList()
+    }).with { it.finalizeValueOnRead(); it }
+
+    doLast {
+        String repositoryName = repositoryNameProperty.getOrNull() ?: ''
+        if (repositoryName.isEmpty()) {
+            throw new GradleException("repositoryNameProperty is empty")
+        }
+        if (repositoryName != 'template') {
+            throw new GradleException("This code should be executed for template repository only")
+        }
+
+        File file = gradlePropertiesFileProperty.get().asFile
+        Properties currentProperties = new Properties()
+        file.withReader('UTF-8') { currentProperties.load(it) }
+
+        String content = file.getText('UTF-8')
+        Map<String, String> handledProperties = [:]
+
+        content = content.replaceFirst(/((?:^|[\r\n]\s*)(java-runtime.min-version))\s*=\s*\d+\S*(\s|$)/) { List<String> groups ->
+            String value = javaLtsVersions.get()[1]
+            handledProperties[groups[2]] = value
+            return "${groups[1]} = ${value}${groups[3]}"
+        }
+
+        content = content.replaceFirst(/((?:^|[\r\n]\s*)(gradle-api.min-version))\s*=\s*\d+\S*(\s|$)/) { List<String> groups ->
+            String value = lastMinorVersions.get().findAll { it == it.baseVersion }[1].version
+            handledProperties[groups[2]] = value
+            return "${groups[1]} = ${value}${groups[3]}"
+        }
+
+        handledProperties.entrySet().removeIf { entry ->
+            String currentValue = currentProperties.getProperty(entry.key)
+            return currentValue == entry.value
+        }
+
+        handledProperties.keySet().forEach { key ->
+            println "  Changing property: $key"
+        }
+
+        if (!handledProperties.isEmpty()) {
+            file.setText(content, 'UTF-8')
+        }
+    }
+}
+
+tasks.named('pushBackTasks').configure { dependsOn(processGradleProperties) }

@@ -1,0 +1,77 @@
+name: Automatic release
+
+on:
+  schedule:
+  - cron: '23 17 * * 2' # sync-with-template: adjust
+  workflow_dispatch:
+    inputs:
+      ignoreExpectedFilesToChange:
+        required: true
+        default: 'false'
+        description: Set to 'true' to skip checking changed files
+        type: choice
+        options:
+        - 'true'
+        - 'false'
+      dryRun:
+        required: true
+        default: 'false'
+        description: Set to 'true' to enable dry run
+        type: choice
+        options:
+        - 'true'
+        - 'false'
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  automatic-release:
+    name: Automatic release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency: automatic-release
+    steps:
+    - name: Automatic release
+      uses: remal-github-actions/automatic-release@v1
+      with:
+        dryRun: ${{inputs.dryRun}}
+        githubToken: ${{secrets.PUSH_BACK_TOKEN}}
+        versionIncrementMode: 'patch'
+        versionTagPrefix: 'v'
+        expectedFilesToChange: |
+          gradle-plugin-api-dependencies.txt
+        ignoreExpectedFilesToChange: ${{inputs.ignoreExpectedFilesToChange}}
+        allowedCommitPrefixes: |
+          [push-back]
+          [noci]
+          [no-ci]
+          [ci]
+          [release-later]
+          [doc]
+          [documentation]
+          [no-changelog]
+          Update README.md
+          Update renovate.json5
+          Update renovate.json
+        skippedChangelogCommitPrefixes: |
+          [push-back]
+          [no-changelog]
+        skippedChangelogPullRequestLabels: |
+          sync-with-template
+        dependencyUpdatesPullRequestLabels: |
+          dependencies
+        miscPullRequestLabels: |
+          sync-with-template
+          remal-gradle-plugins-toolkit
+        actionPathsAllowedToFail: |
+          .github/workflows/automatic-release.yml
+          .github/workflows/bump-repository-activity.yml
+          .github/workflows/check-action-secrets.yml
+          .github/workflows/codeowners-validator.yml
+          .github/workflows/codeql-analysis.yml
+          .github/workflows/codespell.yml
+          .github/workflows/rebase-dependabot-pull-requests.yml
+          .github/workflows/release-drafter.yml
+          .github/workflows/sync-with-template.yml
