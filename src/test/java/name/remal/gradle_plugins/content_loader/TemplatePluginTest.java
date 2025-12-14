@@ -1,4 +1,4 @@
-package name.remal.gradle_plugins.template;
+package name.remal.gradle_plugins.content_loader;
 
 import static name.remal.gradle_plugins.toolkit.reflection.ReflectionUtils.packageNameOf;
 import static name.remal.gradle_plugins.toolkit.reflection.ReflectionUtils.unwrapGeneratedSubclass;

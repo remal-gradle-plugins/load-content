@@ -1,4 +1,4 @@
-package name.remal.gradle_plugins.template;
+package name.remal.gradle_plugins.content_loader;
 
 import lombok.RequiredArgsConstructor;
 import name.remal.gradle_plugins.toolkit.testkit.functional.GradleProject;
