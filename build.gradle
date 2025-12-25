@@ -1,3 +1,5 @@
+import java.lang.reflect.Field
+
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 buildscript {
@@ -28,14 +30,49 @@ apply plugin: 'name.remal.toolkit.build-logic'
 apply plugin: 'java-gradle-plugin'
 
 dependencies {
+    implementation 'org.apache.httpcomponents.client5:httpclient5-cache:5.6'
+
+    implementation platform('tools.jackson:jackson-bom:3.0.3')
+    implementation 'tools.jackson.core:jackson-databind'
+    implementation 'tools.jackson.module:jackson-module-kotlin'
+    implementation 'com.jayway.jsonpath:json-path:2.10.0'
+    implementation 'org.jsoup:jsoup:1.21.2'
+
+
+    testImplementation 'org.wiremock:wiremock:3.13.2'
 }
+
+String pluginId = 'name.remal.content-loader'
 
 gradlePlugin {
     plugins {
         'name.remal.content-loader' {
-            id = 'name.remal.content-loader'
+            id = pluginId
             implementationClass = 'name.remal.gradle_plugins.content_loader.ContentLoaderPlugin'
             displayName = 'Plugin'
         }
     }
+}
+
+buildTimeConstants.property('plugin-id', pluginId)
+
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+
+buildTimeConstants.property('httpclient.cache.version', objects.property(String).value(provider {
+    var classpathUrls = configurations.compileClasspath.files.collect { it.toURI().toURL() }.toArray(new URL[0])
+    return new URLClassLoader(classpathUrls, Logger.classLoader).withCloseable { classLoader ->
+        Class<?> clazz = Class.forName('org.apache.hc.client5.http.impl.cache.HttpByteArrayCacheEntrySerializer', false, classLoader)
+        Field field = clazz.getDeclaredField('HC_CACHE_VERSION')
+        field.accessible = true
+        return field.get(null).toString()
+    }
+}).with { it.finalizeValueOnRead(); it })
+
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+
+// Otherwise tests compilation fails:
+classesRelocation.minimize.addClassReachabilityConfig {
+    className('org.apache.hc.core5.annotation.Contract')
+    onReached()
+    method('threading', '()')
 }
