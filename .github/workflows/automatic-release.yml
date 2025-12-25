@@ -2,7 +2,7 @@ name: Automatic release
 
 on:
   schedule:
-  - cron: '15 21 * * 1' # sync-with-template: adjust
+  - cron: '46 16 * * 1' # sync-with-template: adjust
   workflow_dispatch:
     inputs:
       ignoreExpectedFilesToChange:

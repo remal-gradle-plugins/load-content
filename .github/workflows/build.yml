@@ -10,7 +10,7 @@ on:
     - 'v[0-9]**'
   pull_request: { }
   schedule:
-  - cron: '54 11 * * *' # sync-with-template: adjust
+  - cron: '25 6 * * *' # sync-with-template: adjust
   workflow_dispatch:
     inputs:
       rerun-tests:
